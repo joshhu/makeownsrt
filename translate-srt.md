@@ -1,13 +1,46 @@
 ---
-description: "從 MKV 提取英文字幕並翻譯成繁體中文雙語 SRT"
+description: "從影片提取字幕並翻譯成雙語 SRT"
 allowed-tools: Bash, Read, Write, Edit, Glob, Grep
 ---
 
-# MKV 字幕翻譯技能
+# 影片字幕翻譯技能
 
-將 MKV 影片中的英文字幕提取並翻譯成繁體中文雙語 SRT 檔案。
+從影片中提取字幕並翻譯成雙語 SRT 檔案。輸出檔名與影片主檔名一致，方便播放器自動載入。
 
-**輸入**: `$ARGUMENTS`（MKV 檔案路徑）
+**輸入格式**: `$ARGUMENTS`
+
+**語法**: `<影片路徑> [來源語言>目標語言]`
+
+**範例**:
+- `/translate-srt video.mkv` → 自動偵測來源語言，翻譯成繁體中文
+- `/translate-srt video.mkv en>zh` → 英文翻譯成繁體中文
+- `/translate-srt video.mkv ja>en` → 日文翻譯成英文
+- `/translate-srt video.mkv en>ru` → 英文翻譯成俄文
+- `/translate-srt video.mkv fr>de` → 法文翻譯成德文
+
+**支援的語言代碼與 ffprobe 標籤對照**:
+
+| 代碼 | 語言 | ffprobe 語言標籤 |
+|------|------|-----------------|
+| zh | 繁體中文 | chi, zho, cmn, zh |
+| en | 英文 | eng, en |
+| ja | 日文 | jpn, ja |
+| ko | 韓文 | kor, ko |
+| ru | 俄文 | rus, ru |
+| fr | 法文 | fra, fre, fr |
+| de | 德文 | deu, ger, de |
+| es | 西班牙文 | spa, es |
+| pt | 葡萄牙文 | por, pt |
+| it | 義大利文 | ita, it |
+| ar | 阿拉伯文 | ara, ar |
+| th | 泰文 | tha, th |
+| vi | 越南文 | vie, vi |
+| pl | 波蘭文 | pol, pl |
+| nl | 荷蘭文 | nld, dut, nl |
+| sv | 瑞典文 | swe, sv |
+| tr | 土耳其文 | tur, tr |
+| uk | 烏克蘭文 | ukr, uk |
+| hi | 印地文 | hin, hi |
 
 ---
 
@@ -15,31 +48,57 @@ allowed-tools: Bash, Read, Write, Edit, Glob, Grep
 
 請嚴格按照以下步驟執行：
 
-### 步驟 1：驗證輸入
+### 步驟 0：解析參數
 
-確認 MKV 檔案存在：
-```bash
-ls -la "$ARGUMENTS"
+從 `$ARGUMENTS` 中解析出影片路徑和語言對：
+
+1. 檢查 `$ARGUMENTS` 最後一個空格分隔的 token 是否符合 `XX>YY` 格式（兩個小寫字母 + `>` + 兩個小寫字母）
+2. 如果符合：
+   - 語言對 = 該 token（例如 `ja>en`）
+   - 影片路徑 = 去掉最後一個 token 後的剩餘字串（trim 前後空白）
+3. 如果不符合：
+   - 語言對 = `en>zh`（預設：英文→繁體中文）
+   - 影片路徑 = 整個 `$ARGUMENTS`
+
+將解析結果記為：
+- `SRC_LANG`：來源語言代碼（`>` 左側）
+- `TGT_LANG`：目標語言代碼（`>` 右側）
+- `INPUT_FILE`：影片檔案路徑
+
+顯示解析結果給用戶確認：
+```
+影片：<INPUT_FILE>
+翻譯方向：<SRC_LANG 全名> → <TGT_LANG 全名>
 ```
 
-如果檔案不存在，告知用戶並停止。
+### 步驟 1：驗證輸入
+
+確認影片檔案存在：
+```bash
+ls -la "<INPUT_FILE>"
+```
+
+如果檔案不存在，嘗試用 Glob 搜尋包含關鍵字的檔案。如果仍找不到，告知用戶並停止。
 
 ### 步驟 2：偵測字幕軌
 
 用 ffprobe 列出所有字幕軌：
 ```bash
-ffprobe -v quiet -print_format json -show_streams -select_streams s "$ARGUMENTS"
+ffprobe -v quiet -print_format json -show_streams -select_streams s "<INPUT_FILE>"
 ```
 
-從輸出中找到英文字幕軌（language 為 `eng` 或 `en`）。記下該軌的 stream index。
-如果有多個英文字幕軌，優先選擇非 forced、非 SDH 的軌道。
-如果沒有英文字幕軌，告知用戶並停止。
+根據 `SRC_LANG` 查找對應語言的字幕軌：
+- 對照上方「支援的語言代碼與 ffprobe 標籤對照」表，找到該語言的所有可能標籤
+- 在 ffprobe 輸出中找到 `tags.language` 匹配的字幕軌
+- 如果有多個匹配的字幕軌，優先選擇非 forced、非 SDH 的軌道
+- 如果找不到匹配的字幕軌，列出所有可用的字幕軌讓用戶選擇
+- 記下選定軌道在字幕流中的索引（0-based）
 
-### 步驟 3：提取英文字幕
+### 步驟 3：提取字幕
 
-用 ffmpeg 提取字幕到臨時檔案。假設英文字幕是第 N 個字幕流（從 ffprobe 結果中確認）：
+用 ffmpeg 提取字幕到臨時檔案。假設選定的字幕是第 N 個字幕流：
 ```bash
-ffmpeg -y -i "$ARGUMENTS" -map 0:s:N -c:s srt "/tmp/_translate_temp_eng.srt"
+ffmpeg -y -i "<INPUT_FILE>" -map 0:s:N -c:s srt "/tmp/_translate_temp_src.srt"
 ```
 
 其中 `N` 是字幕流在字幕軌中的索引（0-based）。
@@ -98,7 +157,7 @@ def parse_srt(filepath):
 
     return entries
 
-srt_path = os.path.join(TMPDIR, "_translate_temp_eng.srt")
+srt_path = os.path.join(TMPDIR, "_translate_temp_src.srt")
 entries = parse_srt(srt_path)
 
 # 分批，每批 40 條
@@ -124,17 +183,27 @@ print(json.dumps({"total_entries": len(entries), "total_chunks": len(chunks)}))
 對於每一批（chunk），執行以下流程：
 
 1. 用 Read 工具讀取 `$TMPDIR/_translate_chunk_N.json`（注意使用步驟 3.5 取得的 TMPDIR 路徑）
-2. 將其中每條 `text` 翻譯成繁體中文
+2. 將其中每條 `text` 從 `SRC_LANG` 翻譯成 `TGT_LANG`
 
-**翻譯要求**：
-- 使用台灣慣用的繁體中文
+---
+
+#### 通用翻譯要求（所有語言對適用）：
+
 - 影視翻譯風格，口語自然流暢
-- 人名、地名採用台灣常見譯法
 - 保持語意準確，不要過度意譯
-- 如果原文有口語縮寫（如 gonna, wanna），翻譯也要口語化
+- 如果原文有口語縮寫或俚語，翻譯也要口語化
 - 專有名詞（如品牌名、技術術語）可保留原文
+- 同一人名在全片中必須保持一致的譯法
+- 第一次翻譯某個人名時，記住該譯法，後續批次必須沿用
+- 如果不確定人名怎麼翻，直接保留原文
 
-**人名翻譯嚴格規範**（極重要）：
+#### 目標語言為繁體中文（zh）的額外規範：
+
+- 使用台灣慣用的繁體中文
+- 人名、地名採用台灣常見譯法
+- 如果原文有口語縮寫（如 gonna, wanna），翻譯也要口語化
+
+**人名翻譯嚴格規範**（極重要，僅限中文翻譯）：
 - 絕對不可在人名、地名音譯中使用「乘」（U+4E58）字。這是過去常見的翻譯錯誤。
 - 人名音譯應使用標準的音譯用字，例如：
   - D 音：德、戴、丹、迪、杜、道、達
@@ -145,17 +214,41 @@ print(json.dumps({"total_entries": len(entries), "total_chunks": len(chunks)}))
   - R 音：瑞、里、羅、雷、魯
   - Ch 音：奇、查、柴、切
   - 其他常見：克、斯、森、爾、恩、艾、歐、亞、伊、薩、拉、納、尼
-- 同一人名在全片中必須保持一致的譯法
-- 第一次翻譯某個人名時，記住該譯法，後續批次必須沿用
 - 如果不確定人名怎麼翻，直接保留英文原名
+
+#### 目標語言為日文（ja）的額外規範：
+
+- 使用標準日本語
+- 外來人名使用片假名音譯
+- 語氣要符合角色性別和年齡
+
+#### 目標語言為韓文（ko）的額外規範：
+
+- 使用標準韓國語
+- 外來人名使用韓文音譯慣例
+
+#### 目標語言為俄文（ru）的額外規範：
+
+- 使用標準俄語
+- 外來人名使用俄語音譯慣例（транслитерация）
+
+#### 其他目標語言：
+
+- 使用該語言的標準書面語
+- 人名按照該語言的音譯慣例處理
+- 保持自然流暢的對話風格
+
+---
 
 3. 將翻譯結果寫入 `$TMPDIR/_translate_result_N.json`，格式為：
 ```json
 [
-  {"index": 1, "timecode": "00:00:09,490 --> 00:00:11,992", "zh": "繁中翻譯", "en": "English original"},
+  {"index": 1, "timecode": "00:00:09,490 --> 00:00:11,992", "tgt": "目標語言翻譯", "src": "來源語言原文"},
   ...
 ]
 ```
+
+**注意**：JSON 中一律使用 `"tgt"` 和 `"src"` 作為 key，不論語言對是什麼。
 
 **重要**：每完成一批翻譯就寫入對應的結果檔案，不要等全部翻譯完才寫入。
 
@@ -168,43 +261,52 @@ python3 -c '
 import json, glob, sys
 
 TMPDIR = sys.argv[1]
+TGT_LANG = sys.argv[2]
 errors = []
-# 已知常見錯誤字元
-bad_chars = {"乘": "U+4E58"}
 
-chunk_files = sorted(glob.glob(f"{TMPDIR}/_translate_result_*.json"))
+# 目標語言為中文時，檢查禁用字元
+bad_chars = {}
+if TGT_LANG == "zh":
+    bad_chars = {chr(0x4E58): "U+4E58"}
+
+chunk_files = sorted(glob.glob(TMPDIR + "/_translate_result_*.json"))
+total_entries = 0
 for cf in chunk_files:
     with open(cf, "r", encoding="utf-8") as f:
         chunk = json.load(f)
+    total_entries += len(chunk)
     for entry in chunk:
-        zh = entry.get("zh", "")
+        tgt = entry.get("tgt", "")
         for char, code in bad_chars.items():
-            if char in zh:
-                errors.append(f"第 {entry[\"index\"]} 條含有錯誤字元「{char}」({code}): {zh}")
+            if char in tgt:
+                idx = entry["index"]
+                errors.append(f"Index {idx}: contains forbidden char {code}: {tgt}")
 
 if errors:
-    print(f"⚠️ 發現 {len(errors)} 個翻譯錯誤：")
+    print(f"Found {len(errors)} errors:")
     for e in errors:
         print(f"  - {e}")
-    print("\n請修正以上錯誤後再繼續。")
     sys.exit(1)
 else:
-    print("✅ 翻譯品質驗證通過，無常見錯誤字元。")
-' "$(cygpath -w /tmp 2>/dev/null || echo /tmp)"
+    print(f"Verification passed. {total_entries} entries across {len(chunk_files)} files.")
+' "$TMPDIR" "<TGT_LANG>"
 ```
 
 如果驗證發現錯誤，必須逐一修正含有錯誤字元的翻譯結果，重新寫入對應的 JSON 檔案後再次驗證，直到通過為止。
 
 ### 步驟 6：組裝雙語 SRT
 
-所有批次翻譯完成後，用 Python 組裝最終的雙語 SRT：
+所有批次翻譯完成後，用 Python 組裝最終的雙語 SRT。
+
+**輸出檔名規則**：與影片主檔名一致，副檔名為 `.srt`，方便播放器自動載入。
+例如：`Tulsa.King.S01E04.mkv` → `Tulsa.King.S01E04.srt`
 
 ```bash
 python3 -c '
 import json, glob, os, sys
 
 TMPDIR = sys.argv[1]
-input_mkv = sys.argv[2] if len(sys.argv) > 2 else ""
+input_file = sys.argv[2] if len(sys.argv) > 2 else ""
 
 # 收集所有翻譯結果
 results = []
@@ -218,36 +320,36 @@ for cf in chunk_files:
 # 按 index 排序
 results.sort(key=lambda x: x["index"])
 
-# 組裝 SRT
+# 組裝雙語 SRT（目標語言在上，來源語言在下）
 srt_lines = []
 for entry in results:
     srt_lines.append(str(entry["index"]))
     srt_lines.append(entry["timecode"])
-    srt_lines.append(entry["zh"])
-    srt_lines.append(entry["en"])
+    srt_lines.append(entry["tgt"])
+    srt_lines.append(entry["src"])
     srt_lines.append("")  # 空行分隔
 
 srt_content = "\n".join(srt_lines)
 
-# 輸出檔案路徑：與原始 MKV 同目錄，副檔名改為 .zh-en.srt
-if input_mkv:
-    base = os.path.splitext(input_mkv)[0]
-    output_path = base + ".zh-en.srt"
+# 輸出檔案路徑：與原始影片同目錄，同主檔名，副檔名 .srt
+if input_file:
+    base = os.path.splitext(input_file)[0]
+    output_path = base + ".srt"
 else:
-    output_path = os.path.join(TMPDIR, "output.zh-en.srt")
+    output_path = os.path.join(TMPDIR, "output.srt")
 
 with open(output_path, "w", encoding="utf-8") as f:
     f.write(srt_content)
 
 print(f"雙語字幕已輸出至: {output_path}")
 print(f"共 {len(results)} 條字幕")
-' "$TMPDIR" "$ARGUMENTS"
+' "$TMPDIR" "<INPUT_FILE>"
 ```
 
 ### 步驟 7：清理臨時檔案
 
 ```bash
-rm -f "$TMPDIR/_translate_temp_eng.srt" "$TMPDIR"/_translate_chunk_*.json "$TMPDIR"/_translate_result_*.json
+rm -f "$TMPDIR/_translate_temp_src.srt" "$TMPDIR"/_translate_chunk_*.json "$TMPDIR"/_translate_result_*.json
 ```
 
 ### 步驟 8：報告結果
@@ -255,14 +357,17 @@ rm -f "$TMPDIR/_translate_temp_eng.srt" "$TMPDIR"/_translate_chunk_*.json "$TMPD
 告知用戶：
 - 輸出檔案路徑
 - 總字幕條數
-- 翻譯完成
+- 翻譯方向（來源語言 → 目標語言）
+- 提醒：輸出檔名與影片主檔名一致，播放器應能自動載入字幕
 
 ---
 
 ## 注意事項
 
-- 如果 MKV 中有多個字幕軌，列出讓用戶選擇
+- 如果影片中有多個匹配來源語言的字幕軌，列出讓用戶選擇
+- 如果找不到指定來源語言的字幕軌，列出所有可用字幕軌讓用戶選擇
 - 如果字幕格式不是 SRT（如 ASS/SSA），ffmpeg 會自動轉換
 - 如果字幕超過 500 條，提醒用戶翻譯可能需要較長時間
 - 時間碼必須完全保留，不可修改
 - 每批翻譯時檢查 index 連續性，確保沒有遺漏
+- 輸出的 SRT 檔案一律為目標語言在上、來源語言在下的雙語格式
