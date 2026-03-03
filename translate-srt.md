@@ -1,11 +1,11 @@
 ---
-description: "從影片提取字幕並翻譯成雙語 SRT"
+description: "從影片提取字幕（或語音轉錄）並翻譯成雙語 SRT"
 allowed-tools: Bash, Read, Write, Edit, Glob, Grep
 ---
 
 # 影片字幕翻譯技能
 
-從影片中提取字幕並翻譯成雙語 SRT 檔案。輸出檔名與影片主檔名一致，方便播放器自動載入。
+從影片中提取字幕（或用 Whisper 語音轉錄）並翻譯成雙語 SRT 檔案。輸出檔名與影片主檔名一致，方便播放器自動載入。
 
 **輸入格式**: `$ARGUMENTS`
 
@@ -91,10 +91,58 @@ ffprobe -v quiet -print_format json -show_streams -select_streams s "<INPUT_FILE
 - 對照上方「支援的語言代碼與 ffprobe 標籤對照」表，找到該語言的所有可能標籤
 - 在 ffprobe 輸出中找到 `tags.language` 匹配的字幕軌
 - 如果有多個匹配的字幕軌，優先選擇非 forced、非 SDH 的軌道
-- 如果找不到匹配的字幕軌，列出所有可用的字幕軌讓用戶選擇
+- 如果找不到匹配的字幕軌但有其他字幕軌，列出所有可用的字幕軌讓用戶選擇
+- 如果影片**完全沒有字幕軌**（ffprobe 回傳空的 streams 陣列），跳到**步驟 2.5** 用 Whisper 語音轉錄
 - 記下選定軌道在字幕流中的索引（0-based）
 
+### 步驟 2.5：Whisper 語音轉錄（無字幕軌時觸發）
+
+僅在步驟 2 中確認**影片完全沒有字幕軌**時才執行此步驟。如果已從步驟 2 成功選定字幕軌，跳過此步驟直接到步驟 3。
+
+#### 2.5.1 確認音軌存在
+
+```bash
+ffprobe -v quiet -print_format json -show_streams -select_streams a "<INPUT_FILE>"
+```
+
+如果沒有音軌（streams 陣列為空），告知用戶「影片既無字幕軌也無音軌，無法處理」並停止。
+
+#### 2.5.2 提取音軌為 WAV
+
+```bash
+ffmpeg -y -i "<INPUT_FILE>" -vn -acodec pcm_s16le -ar 16000 -ac 1 "/tmp/_translate_temp_audio.wav"
+```
+
+#### 2.5.3 用 Whisper 轉錄為 SRT
+
+```bash
+PYTHONIOENCODING=utf-8 whisper "/tmp/_translate_temp_audio.wav" \
+  --model large \
+  --language <SRC_LANG> \
+  --output_format srt \
+  --output_dir "/tmp" \
+  --device cuda
+```
+
+**注意**：
+- `<SRC_LANG>` 使用來源語言代碼（如 `en`、`ja`、`zh` 等），Whisper 支援相同的語言代碼
+- 使用 `PYTHONIOENCODING=utf-8` 避免 Windows cp950 編碼錯誤
+- Whisper large 模型需要約 5GB VRAM，轉錄時間取決於影片長度
+- 如果轉錄耗時較長，提醒用戶 Whisper large 模型可能需要數分鐘
+
+#### 2.5.4 重命名 SRT 接續後續流程
+
+Whisper 會輸出 `/tmp/_translate_temp_audio.srt`，將其重命名：
+
+```bash
+mv /tmp/_translate_temp_audio.srt /tmp/_translate_temp_src.srt
+```
+
+完成後直接跳到**步驟 3.5**（取得臨時目錄路徑），跳過步驟 3（因為 SRT 已由 Whisper 產生）。
+
 ### 步驟 3：提取字幕
+
+**注意**：如果步驟 2.5 已經用 Whisper 產生了 SRT，跳過此步驟直接到步驟 3.5。
 
 用 ffmpeg 提取字幕到臨時檔案。假設選定的字幕是第 N 個字幕流：
 ```bash
@@ -349,7 +397,7 @@ print(f"共 {len(results)} 條字幕")
 ### 步驟 7：清理臨時檔案
 
 ```bash
-rm -f "$TMPDIR/_translate_temp_src.srt" "$TMPDIR"/_translate_chunk_*.json "$TMPDIR"/_translate_result_*.json
+rm -f "$TMPDIR/_translate_temp_src.srt" "$TMPDIR/_translate_temp_audio.wav" "$TMPDIR"/_translate_chunk_*.json "$TMPDIR"/_translate_result_*.json
 ```
 
 ### 步驟 8：報告結果
@@ -365,7 +413,11 @@ rm -f "$TMPDIR/_translate_temp_src.srt" "$TMPDIR"/_translate_chunk_*.json "$TMPD
 ## 注意事項
 
 - 如果影片中有多個匹配來源語言的字幕軌，列出讓用戶選擇
-- 如果找不到指定來源語言的字幕軌，列出所有可用字幕軌讓用戶選擇
+- 如果找不到指定來源語言的字幕軌但有其他字幕軌，列出所有可用字幕軌讓用戶選擇
+- 如果影片完全沒有字幕軌但有音軌，自動使用 Whisper 語音轉錄產生 SRT
+- 如果影片既無字幕軌也無音軌，告知用戶並停止
+- Whisper 轉錄使用 large 模型 + CUDA GPU 加速，需要約 5GB VRAM
+- Whisper 指令必須加上 `PYTHONIOENCODING=utf-8` 環境變數以避免 Windows 編碼問題
 - 如果字幕格式不是 SRT（如 ASS/SSA），ffmpeg 會自動轉換
 - 如果字幕超過 500 條，提醒用戶翻譯可能需要較長時間
 - 時間碼必須完全保留，不可修改
