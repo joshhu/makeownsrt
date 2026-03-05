@@ -1,5 +1,5 @@
 ---
-description: "從影片提取字幕（或語音轉錄）並翻譯成雙語 SRT"
+description: "從影片提取字幕（或語音轉錄）並翻譯成雙語 SRT，支援 YouTube 網址下載"
 allowed-tools: Bash, Read, Write, Edit, Glob, Grep
 ---
 
@@ -9,7 +9,7 @@ allowed-tools: Bash, Read, Write, Edit, Glob, Grep
 
 **輸入格式**: `$ARGUMENTS`
 
-**語法**: `<影片路徑> [來源語言>目標語言]`
+**語法**: `<影片路徑或YouTube網址> [來源語言>目標語言]`
 
 **範例**:
 - `/translate-srt video.mkv` → 自動偵測來源語言，翻譯成繁體中文
@@ -17,6 +17,8 @@ allowed-tools: Bash, Read, Write, Edit, Glob, Grep
 - `/translate-srt video.mkv ja>en` → 日文翻譯成英文
 - `/translate-srt video.mkv en>ru` → 英文翻譯成俄文
 - `/translate-srt video.mkv fr>de` → 法文翻譯成德文
+- `/translate-srt https://www.youtube.com/watch?v=xxxxx` → 下載 YouTube 影片，翻譯成繁體中文
+- `/translate-srt https://youtu.be/xxxxx ja>zh` → 下載 YouTube 影片，日文翻譯成繁體中文
 
 **支援的語言代碼與 ffprobe 標籤對照**:
 
@@ -50,26 +52,83 @@ allowed-tools: Bash, Read, Write, Edit, Glob, Grep
 
 ### 步驟 0：解析參數
 
-從 `$ARGUMENTS` 中解析出影片路徑和語言對：
+從 `$ARGUMENTS` 中解析出影片路徑（或 YouTube 網址）和語言對：
 
 1. 檢查 `$ARGUMENTS` 最後一個空格分隔的 token 是否符合 `XX>YY` 格式（兩個小寫字母 + `>` + 兩個小寫字母）
 2. 如果符合：
    - 語言對 = 該 token（例如 `ja>en`）
-   - 影片路徑 = 去掉最後一個 token 後的剩餘字串（trim 前後空白）
+   - 影片路徑/網址 = 去掉最後一個 token 後的剩餘字串（trim 前後空白）
 3. 如果不符合：
    - 語言對 = `en>zh`（預設：英文→繁體中文）
-   - 影片路徑 = 整個 `$ARGUMENTS`
+   - 影片路徑/網址 = 整個 `$ARGUMENTS`
 
 將解析結果記為：
 - `SRC_LANG`：來源語言代碼（`>` 左側）
 - `TGT_LANG`：目標語言代碼（`>` 右側）
-- `INPUT_FILE`：影片檔案路徑
+- `INPUT_FILE`：影片檔案路徑或 YouTube 網址
+
+4. 判斷 `INPUT_FILE` 是否為 YouTube 網址：
+   - 如果 `INPUT_FILE` 包含 `youtube.com/watch`、`youtu.be/`、`youtube.com/shorts/` 等 YouTube URL 模式，標記為 `IS_YOUTUBE=true`
+   - 否則標記為 `IS_YOUTUBE=false`
 
 顯示解析結果給用戶確認：
 ```
-影片：<INPUT_FILE>
+來源：<INPUT_FILE>（YouTube 影片 / 本機檔案）
 翻譯方向：<SRC_LANG 全名> → <TGT_LANG 全名>
 ```
+
+### 步驟 0.5：下載 YouTube 影片（僅 YouTube 網址時執行）
+
+僅在 `IS_YOUTUBE=true` 時執行此步驟。如果是本機檔案，跳過此步驟直接到步驟 1。
+
+#### 0.5.1 用 yt-dlp 下載影片
+
+下載影片到當前工作目錄，使用 mp4 格式：
+
+```bash
+yt-dlp -f "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best" \
+  --merge-output-format mp4 \
+  -o "%(title)s.%(ext)s" \
+  --no-playlist \
+  --write-subs \
+  --sub-langs all \
+  --convert-subs srt \
+  "<YOUTUBE_URL>"
+```
+
+**參數說明**：
+- `-f "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best"`：優先選擇 mp4 格式
+- `--merge-output-format mp4`：合併後輸出為 mp4
+- `-o "%(title)s.%(ext)s"`：以影片標題作為檔名
+- `--no-playlist`：僅下載單一影片，不下載播放清單
+- `--write-subs --sub-langs all --convert-subs srt`：同時下載所有可用字幕並轉換為 SRT 格式
+
+#### 0.5.2 取得下載後的檔案路徑
+
+```bash
+yt-dlp -f "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best" \
+  --merge-output-format mp4 \
+  -o "%(title)s.%(ext)s" \
+  --no-playlist \
+  --print filename \
+  "<YOUTUBE_URL>"
+```
+
+將輸出的檔名設為新的 `INPUT_FILE`。如果下載失敗，告知用戶並停止。
+
+**注意**：yt-dlp 下載的字幕檔案（如果有）會在影片同目錄下，命名為 `<title>.<lang>.srt`。步驟 2 偵測字幕軌時，如果影片本身沒有嵌入字幕但同目錄下有 yt-dlp 下載的外部 SRT 字幕檔，可以直接使用該 SRT 檔案，跳到步驟 3.5。
+
+#### 0.5.3 檢查 yt-dlp 下載的外部字幕
+
+```bash
+ls -la "$(dirname "<INPUT_FILE>")"/*.srt 2>/dev/null
+```
+
+如果找到對應來源語言的 `.srt` 字幕檔：
+- 直接複製該字幕檔到 `/tmp/_translate_temp_src.srt`
+- 跳過步驟 2 和步驟 3，直接到步驟 3.5
+
+如果沒有找到外部字幕檔，繼續正常流程（步驟 1 → 步驟 2）。
 
 ### 步驟 1：驗證輸入
 
@@ -412,6 +471,10 @@ rm -f "$TMPDIR/_translate_temp_src.srt" "$TMPDIR/_translate_temp_audio.wav" "$TM
 
 ## 注意事項
 
+- 支援 YouTube 網址（youtube.com/watch、youtu.be、youtube.com/shorts 等），會自動用 yt-dlp 下載影片
+- YouTube 影片下載到當前工作目錄，檔名使用影片標題
+- yt-dlp 會同時下載可用的字幕（--write-subs），優先使用這些外部字幕，避免不必要的 Whisper 轉錄
+- 如果 yt-dlp 下載失敗（如影片不存在、地區限制、需要登入等），告知用戶具體錯誤原因並停止
 - 如果影片中有多個匹配來源語言的字幕軌，列出讓用戶選擇
 - 如果找不到指定來源語言的字幕軌但有其他字幕軌，列出所有可用字幕軌讓用戶選擇
 - 如果影片完全沒有字幕軌但有音軌，自動使用 Whisper 語音轉錄產生 SRT
